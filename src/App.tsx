@@ -41,6 +41,22 @@ export default function App() {
   const [positions, setPositions] = useState<any[]>([]);
   const [balances, setBalances] = useState<any[]>([]);
 
+  const [availableSymbols, setAvailableSymbols] = useState<string[]>([
+    'BTCUSDT', 'BTCUSD', 'ETHUSDT', 'ETHUSD', 'SOLUSDT', 'SOLUSD'
+  ]);
+
+  const fetchSymbols = async () => {
+    try {
+      const res = await fetch('/api/symbols');
+      const data = await res.json();
+      if (data.success && data.symbols && data.symbols.length > 0) {
+        setAvailableSymbols(data.symbols);
+      }
+    } catch (e) {
+      console.error("Failed to fetch symbols", e);
+    }
+  };
+
   useEffect(() => {
     // Sync local configuration to server on load
     fetch('/api/config', {
@@ -48,6 +64,7 @@ export default function App() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(botConfig)
     });
+    fetchSymbols();
   }, []);
 
   const fetchStatus = async () => {
@@ -155,23 +172,7 @@ export default function App() {
     }
   };
 
-  const SYMBOLS = [
-    'BTCUSDT', 'BTCUSD', 
-    'ETHUSDT', 'ETHUSD',
-    'SOLUSDT', 'SOLUSD',
-    'BNBUSDT', 'BNBUSD',
-    'XRPUSDT', 'XRPUSD',
-    'DOGEUSDT', 'DOGEUSD',
-    'ADAUSDT', 'ADAUSD',
-    'AVAXUSDT', 'AVAXUSD',
-    'LINKUSDT', 'LINKUSD',
-    'MATICUSDT', 'MATICUSD',
-    'DOTUSDT', 'DOTUSD',
-    'UNIUSDT', 'UNIUSD',
-    'LTCUSDT', 'LTCUSD',
-    'BCHUSDT', 'BCHUSD',
-    'PIPPINUSDT', 'PIPPINUSD'
-  ];
+
   const TIMEFRAMES = [
     { label: '1 Minute', value: '1m' },
     { label: '3 Minutes', value: '3m' },
@@ -233,7 +234,7 @@ export default function App() {
                     disabled={isRunning}
                     className="w-full bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-neutral-600 disabled:opacity-50"
                   >
-                    {SYMBOLS.map(sym => <option key={sym} value={sym}>{sym}</option>)}
+                    {availableSymbols.map(sym => <option key={sym} value={sym}>{sym}</option>)}
                   </select>
                 </div>
 

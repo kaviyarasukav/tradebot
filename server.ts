@@ -350,6 +350,22 @@ app.get('/api/balances', async (req, res) => {
   }
 });
 
+app.get('/api/symbols', async (req, res) => {
+  try {
+    const exchange = await getExchange();
+    await exchange.loadMarkets();
+    const symbols = Object.keys(exchange.markets)
+      .filter(s => s.includes(':USDT') || s.includes(':USD'))
+      .map(s => s.split(':')[0].replace('/', ''));
+    
+    // Deduplicate symbols
+    const uniqueSymbols = [...new Set(symbols)].sort();
+    return res.json({ success: true, symbols: uniqueSymbols });
+  } catch (error: any) {
+    return res.status(400).json({ success: false, message: formatDeltaError(error) });
+  }
+});
+
 // --- EMA and Bot Logic ---
 let botInterval: NodeJS.Timeout | null = null;
 let tradingConfig: any = { 
