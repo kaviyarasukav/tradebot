@@ -38,6 +38,9 @@ export default function App() {
   const [pingData, setPingData] = useState<any>(null);
   const [isPinging, setIsPinging] = useState(false);
   const [apiAuthError, setApiAuthError] = useState<string | null>(null);
+  const [hasKeys, setHasKeys] = useState(false);
+  const [apiForm, setApiForm] = useState({ apiKey: '', apiSecret: '' });
+  const [showApiManager, setShowApiManager] = useState(false);
 
   const [positions, setPositions] = useState<any[]>([]);
   const [balances, setBalances] = useState<any[]>([]);
@@ -75,6 +78,7 @@ export default function App() {
       setIsRunning(data.isBotRunning);
       setLogs(data.logs);
       setApiAuthError(data.apiAuthError || null);
+      setHasKeys(data.hasKeys);
       // We don't overwrite botConfig with server data since localstorage is the source of truth
     } catch (e) {
       console.error("Failed to fetch status");
@@ -173,6 +177,36 @@ export default function App() {
     }
   };
 
+  const saveApiCredentials = async () => {
+    try {
+      const res = await fetch('/api/credentials', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(apiForm)
+      });
+      const data = await res.json();
+      if (data.success) {
+        setShowApiManager(false);
+        setApiForm({ apiKey: '', apiSecret: '' });
+        fetchStatus();
+      } else {
+        alert("Failed to save credentials: " + data.message);
+      }
+    } catch (e) {
+      console.error("Failed to save credentials", e);
+    }
+  };
+
+  const clearMemory = async () => {
+    if (!window.confirm("Are you sure you want to clear bot memory and reset caches? This will also stop the bot.")) return;
+    try {
+      await fetch('/api/clear-memory', { method: 'POST' });
+      fetchStatus();
+    } catch (e) {
+      console.error("Failed to clear memory", e);
+    }
+  };
+
 
   const TIMEFRAMES = [
     { label: '1 Minute', value: '1m' },
@@ -199,22 +233,73 @@ export default function App() {
             <p className="text-neutral-500 mt-1 text-sm">Automated EMA Signal Execution</p>
           </div>
 
-          <div className="flex items-center gap-3 bg-neutral-900 border border-neutral-800 rounded-full px-4 py-2 w-max">
-            <div className={`w-2.5 h-2.5 rounded-full ${isRunning ? 'bg-emerald-500 animate-pulse' : 'bg-neutral-500'}`} />
-            <span className="text-sm font-medium text-neutral-300">
-              {isRunning ? 'System Active' : 'System Offline'}
-            </span>
+          <div className="flex flex-wrap items-center gap-3">
+            <button 
+              onClick={() => setShowApiManager(!showApiManager)}
+              className="bg-neutral-900 border border-neutral-700 hover:border-blue-500/50 text-neutral-300 hover:text-white rounded-lg px-4 py-2 text-sm transition-colors"
+            >
+              API Management
+            </button>
+            <div className="flex items-center gap-3 bg-neutral-900 border border-neutral-800 rounded-full px-4 py-2 w-max">
+              <div className={`w-2.5 h-2.5 rounded-full ${isRunning ? 'bg-emerald-500 animate-pulse' : 'bg-neutral-500'}`} />
+              <span className="text-sm font-medium text-neutral-300">
+                {isRunning ? 'System Active' : 'System Offline'}
+              </span>
+            </div>
           </div>
         </header>
 
-        {apiAuthError && (
+        {showApiManager && (
+          <div className="mb-6 p-6 bg-neutral-900 border border-neutral-700 rounded-xl">
+            <h2 className="text-lg font-medium text-white mb-4">API Management</h2>
+            <p className="text-sm text-neutral-400 mb-4">Enter your Delta Exchange API keys. These will be saved locally to your .env file.</p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+              <div>
+                <label className="block text-xs text-neutral-500 mb-1">API Key</label>
+                <input 
+                  type="password" 
+                  value={apiForm.apiKey}
+                  onChange={e => setApiForm({...apiForm, apiKey: e.target.value})}
+                  className="w-full bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
+                  placeholder="Enter API Key"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-neutral-500 mb-1">API Secret</label>
+                <input 
+                  type="password" 
+                  value={apiForm.apiSecret}
+                  onChange={e => setApiForm({...apiForm, apiSecret: e.target.value})}
+                  className="w-full bg-neutral-950 border border-neutral-800 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
+                  placeholder="Enter API Secret"
+                />
+              </div>
+            </div>
+            <div className="flex gap-3">
+              <button onClick={saveApiCredentials} className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-sm font-medium transition-colors">
+                Save Credentials
+              </button>
+              <button onClick={() => setShowApiManager(false)} className="px-4 py-2 bg-neutral-800 hover:bg-neutral-700 text-white rounded-lg text-sm font-medium transition-colors">
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+
+        {(!hasKeys || apiAuthError) && !showApiManager && (
           <div className="mb-6 p-4 bg-red-500/10 border border-red-500/20 rounded-xl flex items-start gap-3 w-full">
             <AlertCircle className="w-5 h-5 text-red-500 mt-0.5 shrink-0" />
             <div>
-              <h3 className="text-sm font-medium text-red-400">Delta API Authentication Error</h3>
-              <p className="text-xs text-red-400/80 mt-1">
-                {apiAuthError}
+              <h3 className="text-sm font-medium text-red-400">Delta API Authentication Required</h3>
+              <p className="text-xs text-red-400/80 mt-1 mb-3">
+                {apiAuthError || "API Keys are missing. Please configure them in API Management."}
               </p>
+              <button 
+                onClick={() => setShowApiManager(true)}
+                className="text-xs bg-red-500/20 hover:bg-red-500/30 text-red-300 px-3 py-1.5 rounded transition-colors"
+              >
+                Open API Management
+              </button>
             </div>
           </div>
         )}
@@ -427,10 +512,10 @@ export default function App() {
                 )}
               </button>
               
-              {!isRunning && (
+              {!isRunning && !hasKeys && (
                 <div className="mt-4 flex items-start gap-2 text-xs text-neutral-500 bg-neutral-950 p-3 rounded-lg border border-neutral-800/50">
                   <AlertCircle className="w-4 h-4 text-amber-500 shrink-0" />
-                  Configure trades above and ensure credentials are in .env before starting.
+                  Configure trades above and ensure credentials are set in API Management before starting.
                 </div>
               )}
 
@@ -505,6 +590,15 @@ export default function App() {
                   className="flex items-center justify-center py-2 bg-red-500/10 text-red-500 hover:bg-red-500/20 border border-red-500/20 rounded-lg text-sm font-medium transition-colors"
                 >
                   Sell (Short)
+                </button>
+              </div>
+
+              <div className="mt-4 pt-4 border-t border-neutral-800/50">
+                <button 
+                  onClick={clearMemory}
+                  className="w-full flex items-center justify-center gap-2 py-2 px-4 rounded-lg font-medium transition-all duration-200 bg-neutral-950 text-neutral-400 hover:bg-red-500/10 hover:text-red-400 border border-neutral-800 hover:border-red-500/20"
+                >
+                  Clear Bot Memory
                 </button>
               </div>
             </div>
