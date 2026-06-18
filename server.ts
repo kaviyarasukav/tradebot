@@ -110,9 +110,25 @@ async function placeDeltaMarketOrder(symbol: string, side: string, sizeInput: nu
     }
 
     const orderSide = side.toLowerCase() as 'buy' | 'sell';
-    const params: any = { ...extraParams };
+    // Strip out TP/SL bracket fields from the main order params — they go to a separate endpoint
+    const { bracket_take_profit_price, bracket_take_profit_limit_price, bracket_stop_loss_price, bracket_stop_loss_limit_price, _limitPrice, ...cleanExtraParams } = extraParams;
+    const params: any = { ...cleanExtraParams };
     
-    if (currentPrice && !extraParams.reduce_only) {
+    const isLimit = tradingConfig.orderType === 'limit';
+    const priceToUse = _limitPrice ? Number(_limitPrice) : currentPrice;
+    
+    if (isLimit && priceToUse) {
+      params.limit_price = String(priceToUse);
+    }
+    
+    const orderType = isLimit ? 'limit_order' : 'market_order';
+
+    const result = await deltaClient.placeOrder(productId, size, orderSide, orderType, params);
+    const placedOrder = result.result || result;
+
+    // ── STEP: Place bracket (TP/SL) as a separate /v2/orders/bracket request ──
+    // Only attach bracket if this is an entry order (not a reduce_only close)
+    if (!extraParams.reduce_only && currentPrice) {
       const isBuy = orderSide === 'buy';
       
       const formatPrice = (val: number) => {
@@ -123,40 +139,50 @@ async function placeDeltaMarketOrder(symbol: string, side: string, sizeInput: nu
         return val.toFixed(1);
       };
 
-      if (tradingConfig.takeProfitPct) {
-        const tpPct = parseFloat(tradingConfig.takeProfitPct);
-        if (!isNaN(tpPct) && tpPct > 0) {
+      const tpPct = tradingConfig.takeProfitPct ? parseFloat(tradingConfig.takeProfitPct) : NaN;
+      const slPct = tradingConfig.stopLossPct ? parseFloat(tradingConfig.stopLossPct) : NaN;
+
+      const hasTp = !isNaN(tpPct) && tpPct > 0;
+      const hasSl = !isNaN(slPct) && slPct > 0;
+
+      if ((hasTp || hasSl) && placedOrder?.id) {
+        const bracketBody: any = {
+          product_id: productId,
+          product_symbol: symbol,
+        };
+
+        if (hasTp) {
           const tpPrice = isBuy
             ? currentPrice * (1 + tpPct / 100)
             : currentPrice * (1 - tpPct / 100);
-          params.bracket_take_profit_limit_price = formatPrice(tpPrice);
-          params.bracket_take_profit_price = formatPrice(tpPrice);
+          bracketBody.take_profit_order = {
+            order_type: 'limit_order',
+            stop_price: formatPrice(tpPrice),
+            limit_price: formatPrice(tpPrice),
+          };
         }
-      }
 
-      if (tradingConfig.stopLossPct) {
-        const slPct = parseFloat(tradingConfig.stopLossPct);
-        if (!isNaN(slPct) && slPct > 0) {
+        if (hasSl) {
           const slPrice = isBuy
             ? currentPrice * (1 - slPct / 100)
             : currentPrice * (1 + slPct / 100);
-          params.bracket_stop_loss_limit_price = formatPrice(slPrice);
-          params.bracket_stop_loss_price = formatPrice(slPrice);
+          bracketBody.stop_loss_order = {
+            order_type: 'limit_order',
+            stop_price: formatPrice(slPrice),
+            limit_price: formatPrice(slPrice),
+          };
+        }
+
+        try {
+          await deltaClient.placeBracketOrder(bracketBody);
+          addLog(`🛡️ Bracket order (TP/SL) placed for order ${placedOrder.id}`, 'info');
+        } catch (bracketErr: any) {
+          addLog(`⚠️ Main order placed but bracket (TP/SL) failed: ${bracketErr.message}`, 'error');
         }
       }
     }
-    
-    const isLimit = tradingConfig.orderType === 'limit';
-    const priceToUse = extraParams._limitPrice ? Number(extraParams._limitPrice) : currentPrice;
-    
-    if (isLimit && priceToUse) {
-      params.limit_price = String(priceToUse);
-    }
-    
-    const orderType = isLimit ? 'limit_order' : 'market_order';
 
-    const result = await deltaClient.placeOrder(productId, size, orderSide, orderType, params);
-    return result.result || result;
+    return placedOrder;
   } catch (error: any) {
     throw new Error(`Delta API Error during trade execution: ${formatDeltaError(error)}`);
   }
@@ -165,10 +191,9 @@ async function placeDeltaMarketOrder(symbol: string, side: string, sizeInput: nu
 // --- Diagnostic Ping ---
 app.post('/api/ping', async (req, res) => {
   try {
-    const [balancesResp, profileResp, settingsResp] = await Promise.all([
+    const [balancesResp, profileResp] = await Promise.all([
        deltaClient.getBalances(),
        deltaClient.getProfile(),
-       deltaClient.getSettings()
     ]);
     
     const assets = (balancesResp.result || []).map((a: any) => ({
@@ -181,7 +206,7 @@ app.post('/api/ping', async (req, res) => {
        success: true, 
        assets, 
        profile: profileResp.result, 
-       serverTime: settingsResp.result?.server_time, 
+       serverTime: Date.now(), // Delta has no /v2/settings; use local time
        localTime: Date.now() 
     });
   } catch (error: any) {
@@ -195,6 +220,8 @@ app.post('/api/ping', async (req, res) => {
 app.get('/api/positions', async (req, res) => {
   try {
     const { symbol } = req.query;
+    // Ensure products are cached so we can map product_id → symbol
+    if (productsCache.length === 0) await syncProducts();
     const positionsResp = await deltaClient.getPositions();
     let positions = positionsResp.result || [];
     
@@ -249,7 +276,8 @@ app.get('/api/balances', async (req, res) => {
         asset: a.asset_symbol,
         total: parseFloat(a.balance),
         free: parseFloat(a.available_balance),
-        used: parseFloat(a.order_margin) + parseFloat(a.position_margin)
+        // Delta API returns 'blocked_margin', not order_margin/position_margin
+        used: parseFloat(a.blocked_margin || '0')
     })).filter((a: any) => a.total > 0);
 
     return res.json({ success: true, assets });
@@ -328,7 +356,9 @@ const runBotCycle = async () => {
     }
     
     let ohlcv: any[] | undefined = undefined;
-    const binanceSymbol = tradingConfig.symbol.replace('USD', '/USDT');
+    // Convert Delta symbol (e.g. BTCUSD or BTCUSDT) to Binance format (BTC/USDT)
+    // Handles: BTCUSD → BTC/USDT  |  BTCUSDT → BTC/USDT  (avoids BTC/USDTT bug)
+    const binanceSymbol = tradingConfig.symbol.replace(/USDT$/, '/USDT').replace(/USD$/, '/USDT');
     
     if (!binanceUnsupportedSymbols.has(binanceSymbol)) {
       try {
@@ -385,6 +415,8 @@ const runBotCycle = async () => {
         if (!tradingConfig.stopLossPct || parseFloat(tradingConfig.stopLossPct) <= 0) {
            addLog(`❌ Mandatory Stop Loss is missing! Configure Stop Loss (%) > 0. Bot stopped.`, 'error');
            isBotRunning = false;
+           // FIX: also clear the interval so the timer does not keep firing
+           if (botInterval) { clearInterval(botInterval); botInterval = null; }
            return;
         }
 
@@ -583,7 +615,9 @@ app.post('/api/manual-trade', async (req, res) => {
     // Fallback current price using Binance to assist with TP/SL calculations on manual trades
     let currentPrice: number | undefined = undefined;
     try {
-      const binanceSymbol = symbol.replace('USD', '/USDT');
+      // Convert Delta symbol (e.g. BTCUSD or BTCUSDT) to Binance format (BTC/USDT)
+      // Handles: BTCUSD → BTC/USDT  |  BTCUSDT → BTC/USDT  (avoids BTC/USDTT bug)
+      const binanceSymbol = symbol.replace(/USDT$/, '/USDT').replace(/USD$/, '/USDT');
       const binance = new ccxt.binance();
       const ticker = await binance.fetchTicker(binanceSymbol);
       if (ticker.last) currentPrice = ticker.last;

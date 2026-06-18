@@ -81,16 +81,14 @@ export class DeltaClient {
   }
 
   async getPositions() {
-    return await this.makeRequest('GET', '/v2/positions');
+    return await this.makeRequest('GET', '/v2/positions/margined');
   }
 
   async getProfile() {
     return await this.makeRequest('GET', '/v2/profile');
   }
   
-  async getSettings() {
-    return await this.makeRequest('GET', '/v2/settings', {}, {}, false);
-  }
+  // NOTE: /v2/settings does not exist. Server time is obtained from the profile endpoint.
 
   async placeOrder(productId: number, size: number, side: 'buy' | 'sell', orderType: 'market_order' | 'limit_order' = 'market_order', extraParams: any = {}) {
     const payload = {
@@ -101,6 +99,21 @@ export class DeltaClient {
       ...extraParams
     };
     return await this.makeRequest('POST', '/v2/orders', {}, payload);
+  }
+
+  /**
+   * Places a bracket (TP/SL) order for an existing position.
+   * Body must follow Delta's CreateBracketOrderRequest schema with
+   * nested take_profit_order and/or stop_loss_order objects.
+   * Endpoint: POST /v2/orders/bracket
+   */
+  async placeBracketOrder(payload: {
+    product_id: number;
+    product_symbol?: string;
+    take_profit_order?: { order_type: string; stop_price: string; limit_price?: string };
+    stop_loss_order?: { order_type: string; stop_price: string; limit_price?: string; trail_amount?: string };
+  }) {
+    return await this.makeRequest('POST', '/v2/orders/bracket', {}, payload);
   }
 }
 
