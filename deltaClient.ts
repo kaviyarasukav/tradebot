@@ -6,9 +6,30 @@ dotenv.config();
 
 export class DeltaClient {
   private baseUrl: string;
+  private timeOffset: number = 0;
+  private timeSynced: boolean = false;
 
   constructor() {
     this.baseUrl = process.env.DELTA_BASE_URL || 'https://api.india.delta.exchange';
+  }
+
+  async syncTime() {
+    try {
+      const startTime = Date.now();
+      const res = await axios.get(`${this.baseUrl}/v2/products`, { timeout: 5000 });
+      const endTime = Date.now();
+      const serverDate = res.headers['date'];
+      if (serverDate) {
+        const serverTimeMs = new Date(serverDate).getTime();
+        const rtt = endTime - startTime;
+        const estimatedServerTimeMs = serverTimeMs + (rtt / 2);
+        this.timeOffset = Math.round((estimatedServerTimeMs - endTime) / 1000);
+        this.timeSynced = true;
+        console.log(`[DeltaClient] Clock sync successful. Server offset: ${this.timeOffset}s (RTT: ${rtt}ms)`);
+      }
+    } catch (e: any) {
+      console.warn('[DeltaClient] Failed to sync time with server. Falling back to local clock.', e.message);
+    }
   }
 
   private getAuthHeaders(method: string, path: string, queryParams: any, payload: any) {
@@ -19,7 +40,7 @@ export class DeltaClient {
       throw new Error('Missing Delta API credentials (DELTA_KEY, DELTA_SECRET)');
     }
 
-    const timestamp = Math.floor(Date.now() / 1000).toString();
+    const timestamp = (Math.floor(Date.now() / 1000) + this.timeOffset).toString();
     const queryString = Object.keys(queryParams).length > 0 
       ? '?' + new URLSearchParams(queryParams).toString() 
       : '';
@@ -39,6 +60,10 @@ export class DeltaClient {
   }
 
   private async makeRequest(method: string, path: string, queryParams: any = {}, payload: any = {}, isPrivate: boolean = true) {
+    if (isPrivate && !this.timeSynced) {
+      await this.syncTime();
+    }
+
     const queryString = Object.keys(queryParams).length > 0 
       ? '?' + new URLSearchParams(queryParams).toString() 
       : '';
@@ -66,7 +91,31 @@ export class DeltaClient {
       return response.data;
     } catch (error: any) {
       if (error.response && error.response.data) {
-         throw new Error(JSON.stringify(error.response.data));
+        const errData = error.response.data;
+        if (isPrivate && errData.error && errData.error.code === 'expired_signature' && errData.error.context) {
+          const reqTime = errData.error.context.request_time;
+          const svrTime = errData.error.context.server_time;
+          if (reqTime && svrTime) {
+            const newOffset = svrTime - Math.floor(Date.now() / 1000);
+            if (Math.abs(newOffset - this.timeOffset) > 2) {
+              const oldOffset = this.timeOffset;
+              this.timeOffset = newOffset;
+              this.timeSynced = true;
+              console.log(`[DeltaClient] Detected signature expiration. Automatically adjusted server offset to ${this.timeOffset}s (shift: ${this.timeOffset - oldOffset}s)`);
+            }
+            
+            const retryHeaders = this.getAuthHeaders(method, path, queryParams, payload);
+            const retryResponse = await axios({
+              method,
+              url,
+              data: Object.keys(payload).length > 0 ? payload : undefined,
+              headers: retryHeaders,
+              timeout: 10000
+            });
+            return retryResponse.data;
+          }
+        }
+        throw new Error(JSON.stringify(errData));
       }
       throw error;
     }
@@ -114,6 +163,16 @@ export class DeltaClient {
     stop_loss_order?: { order_type: string; stop_price: string; limit_price?: string; trail_amount?: string };
   }) {
     return await this.makeRequest('POST', '/v2/orders/bracket', {}, payload);
+  }
+
+  /**
+   * Sets leverage for a specific product.
+   * Must be called before placing orders to ensure correct margin usage.
+   * Endpoint: POST /v2/products/{product_id}/orders/leverage
+   */
+  async setLeverage(productId: number, leverage: number) {
+    const payload = { leverage: String(leverage) };
+    return await this.makeRequest('POST', `/v2/products/${productId}/orders/leverage`, {}, payload);
   }
 }
 
